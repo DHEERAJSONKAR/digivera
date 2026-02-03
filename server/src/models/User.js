@@ -5,13 +5,20 @@ const userSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: [true, 'Name is required'],
+      required: function() {
+        // Name required unless phone-only user
+        return !this.phoneNumber || this.email;
+      },
       trim: true,
     },
     email: {
       type: String,
-      required: [true, 'Email is required'],
+      required: function() {
+        // Email required unless phone-only user
+        return !this.phoneNumber;
+      },
       unique: true,
+      sparse: true,
       lowercase: true,
       trim: true,
       match: [
@@ -19,11 +26,25 @@ const userSchema = new mongoose.Schema(
         'Please provide a valid email',
       ],
     },
+    phoneNumber: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+    },
     password: {
       type: String,
-      required: [true, 'Password is required'],
+      required: function() {
+        // Password not required for Google OAuth users or phone users
+        return !this.googleId && !this.phoneNumber;
+      },
       minlength: [6, 'Password must be at least 6 characters'],
       select: false,
+    },
+    googleId: {
+      type: String,
+      default: null,
+      sparse: true,
     },
     plan: {
       type: String,
@@ -37,6 +58,23 @@ const userSchema = new mongoose.Schema(
       max: 100,
     },
     lastManualScanAt: {
+      type: Date,
+      default: null,
+    },
+    resetPasswordToken: {
+      type: String,
+      default: null,
+    },
+    resetPasswordExpires: {
+      type: Date,
+      default: null,
+    },
+    phoneOtpHash: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    phoneOtpExpires: {
       type: Date,
       default: null,
     },
