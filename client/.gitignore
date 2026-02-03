@@ -1,9 +1,0 @@
-# Dependencies
-node_modules/
-dist/
-dist-ssr/
-
-# Environment
-.env
-package-lock.json
-
