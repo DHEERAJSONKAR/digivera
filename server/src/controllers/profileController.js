@@ -2,6 +2,8 @@ const User = require('../models/User');
 const Scan = require('../models/Scan');
 const Alert = require('../models/Alert');
 const Subscription = require('../models/Subscription');
+const path = require('path');
+const fs = require('fs');
 
 // @desc    Get logged-in user profile
 // @route   GET /api/me
@@ -28,6 +30,7 @@ const getProfile = async (req, res) => {
         googleId: user.googleId || null,
         plan: user.plan,
         reputationScore: user.reputationScore,
+        profilePhoto: user.profilePhoto || null,
         createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
@@ -47,16 +50,49 @@ const getProfile = async (req, res) => {
 // @access  Private
 const updateProfile = async (req, res) => {
   try {
-    const { name, email, phoneNumber } = req.body;
+    const { name, email, phoneNumber, currentPassword, newPassword } = req.body;
 
-    // Find user
-    const user = await User.findById(req.user._id);
+    // Find user with password field (needed for password change)
+    const user = await User.findById(req.user._id).select('+password');
 
     if (!user) {
       return res.status(404).json({
         success: false,
         message: 'User not found',
       });
+    }
+
+    // Handle password change if requested
+    if (newPassword) {
+      // Validate current password is provided
+      if (!currentPassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'Current password is required to change password',
+        });
+      }
+
+      // Verify current password (only if user has password - not for Google OAuth users)
+      if (user.password) {
+        const isPasswordValid = await user.comparePassword(currentPassword);
+        if (!isPasswordValid) {
+          return res.status(400).json({
+            success: false,
+            message: 'Current password is incorrect',
+          });
+        }
+      }
+
+      // Validate new password length
+      if (newPassword.length < 6) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be at least 6 characters',
+        });
+      }
+
+      // Update password (will be hashed by pre-save middleware)
+      user.password = newPassword;
     }
 
     // Update only allowed fields
@@ -105,7 +141,7 @@ const updateProfile = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: 'Profile updated successfully',
+      message: newPassword ? 'Profile and password updated successfully' : 'Profile updated successfully',
       data: {
         id: user._id,
         name: user.name,
@@ -113,6 +149,8 @@ const updateProfile = async (req, res) => {
         phoneNumber: user.phoneNumber || null,
         plan: user.plan,
         reputationScore: user.reputationScore,
+        profilePhoto: user.profilePhoto || null,
+        createdAt: user.createdAt,
         updatedAt: user.updatedAt,
       },
     });
@@ -187,8 +225,117 @@ const deleteProfile = async (req, res) => {
   }
 };
 
+// @desc    Upload profile photo
+// @route   POST /api/me/photo
+// @access  Private
+const uploadProfilePhoto = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No file uploaded',
+      });
+    }
+
+    // Find user
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      // Delete uploaded file if user not found
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    // Delete old profile photo if exists
+    if (user.profilePhoto) {
+      const oldPhotoPath = path.join(__dirname, '../../uploads/profiles', path.basename(user.profilePhoto));
+      if (fs.existsSync(oldPhotoPath)) {
+        fs.unlinkSync(oldPhotoPath);
+      }
+    }
+
+    // Save new photo path (relative URL)
+    user.profilePhoto = `/uploads/profiles/${req.file.filename}`;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile photo uploaded successfully',
+      data: {
+        profilePhoto: user.profilePhoto,
+      },
+    });
+  } catch (error) {
+    // Delete uploaded file on error
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
+    
+    console.error('Upload profile photo error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error uploading profile photo',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Delete profile photo
+// @route   DELETE /api/me/photo
+// @access  Private
+const deleteProfilePhoto = async (req, res) => {
+  try {
+    // Find user
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    if (!user.profilePhoto) {
+      return res.status(400).json({
+        success: false,
+        message: 'No profile photo to delete',
+      });
+    }
+
+    // Delete photo file
+    const photoPath = path.join(__dirname, '../../uploads/profiles', path.basename(user.profilePhoto));
+    if (fs.existsSync(photoPath)) {
+      fs.unlinkSync(photoPath);
+    }
+
+    // Remove photo from database
+    user.profilePhoto = null;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Profile photo deleted successfully',
+      data: {
+        profilePhoto: null,
+      },
+    });
+  } catch (error) {
+    console.error('Delete profile photo error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error deleting profile photo',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   getProfile,
   updateProfile,
   deleteProfile,
+  uploadProfilePhoto,
+  deleteProfilePhoto,
 };

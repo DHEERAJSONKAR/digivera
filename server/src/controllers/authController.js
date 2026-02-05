@@ -235,10 +235,13 @@ const forgotPassword = async (req, res) => {
 const resetPassword = async (req, res) => {
   try {
     const { token } = req.params;
-    const { newPassword } = req.body;
+    const { password, newPassword } = req.body;
+    
+    // Accept either 'password' or 'newPassword' field
+    const passwordToSet = password || newPassword;
 
     // Validate input
-    if (!newPassword) {
+    if (!passwordToSet) {
       return res.status(400).json({
         success: false,
         message: 'Please provide a new password',
@@ -246,7 +249,7 @@ const resetPassword = async (req, res) => {
     }
 
     // Validate password length
-    if (newPassword.length < 6) {
+    if (passwordToSet.length < 6) {
       return res.status(400).json({
         success: false,
         message: 'Password must be at least 6 characters',
@@ -273,14 +276,23 @@ const resetPassword = async (req, res) => {
     }
 
     // Update password (will be hashed by pre-save middleware)
-    user.password = newPassword;
+    user.password = passwordToSet;
     user.resetPasswordToken = null;
     user.resetPasswordExpires = null;
     await user.save();
 
+    // Generate token for auto-login
+    const authToken = generateToken(user._id);
+
     res.status(200).json({
       success: true,
       message: 'Password reset successful. You can now login with your new password.',
+      token: authToken,
+      data: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+      }
     });
   } catch (error) {
     console.error('Reset password error:', error);

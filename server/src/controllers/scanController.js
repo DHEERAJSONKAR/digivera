@@ -2,6 +2,7 @@ const Scan = require('../models/Scan');
 const Alert = require('../models/Alert');
 const User = require('../models/User');
 const { calculateRiskScore } = require('../services/riskCalculator');
+const githubExposureService = require('../services/githubExposureService');
 
 // @desc    Run a new scan
 // @route   POST /api/scan
@@ -59,19 +60,44 @@ const runScan = async (req, res) => {
       }
     }
 
-    // Simulate scan with random data
-    const breachCount = Math.floor(Math.random() * 4); // 0-3
-    const publicMentions = Math.floor(Math.random() * 6); // 0-5
-
+    // Initialize findings object
     const findings = {
-      breachCount,
-      publicMentions,
+      publicExposure: 0,
+      publicMentions: 0,
     };
 
-    // Calculate risk score
-    const { finalScore, severity } = calculateRiskScore(findings);
+    let githubExposureCount = 0;
+    let scanLimitedData = false;
 
-    // Save scan to database
+    // Check for public GitHub exposure (email scans only)
+    if (scanTarget === 'email') {
+      try {
+        const githubResult = await githubExposureService.checkEmailExposure(targetValue);
+        
+        if (githubResult.error) {
+          // GitHub service had issues, but scan continues
+          scanLimitedData = true;
+          console.warn('[Scan] GitHub check unavailable:', githubResult.error);
+        } else if (githubResult.found) {
+          // Email found in public GitHub code
+          githubExposureCount = githubResult.count;
+          findings.publicExposure = githubExposureCount;
+        }
+      } catch (error) {
+        console.error('[Scan] GitHub exposure check failed:', error.message);
+        scanLimitedData = true;
+      }
+    }
+
+    // Calculate risk score based on findings
+    const { finalScore, severity, explanation } = calculateRiskScore(findings);
+
+    // Get previous scan for comparison (alert logic)
+    const previousScan = await Scan.findOne({ userId, scanTarget, targetValue })
+      .sort({ createdAt: -1 })
+      .select('findings');
+
+    // Save new scan to database
     const scan = await Scan.create({
       userId,
       scanTarget,
@@ -80,20 +106,24 @@ const runScan = async (req, res) => {
       riskScore: finalScore,
     });
 
-    // Create alert if severity is medium or high
-    if (severity === 'medium' || severity === 'high') {
-      const alertType = breachCount > 0 ? 'breach' : 'exposure';
-      const alertMessage =
-        severity === 'high'
-          ? `Critical: Your ${scanTarget} "${targetValue}" has ${breachCount} breach(es) and ${publicMentions} public mention(s). Immediate action required!`
-          : `Warning: Your ${scanTarget} "${targetValue}" has ${breachCount} breach(es) and ${publicMentions} public mention(s). Review recommended.`;
+    // Create alert ONLY if NEW public exposure detected
+    if (githubExposureCount > 0) {
+      const previousExposure = previousScan?.findings?.publicExposure || 0;
+      
+      // Alert only if this is a new exposure or exposure count increased
+      if (previousExposure === 0 || githubExposureCount > previousExposure) {
+        const alertSeverity = githubExposureCount >= 5 ? 'high' : 'medium';
+        const alertMessage = githubExposureCount >= 5
+          ? `Critical: Your email "${targetValue}" was found in ${githubExposureCount} publicly accessible code repositories. Immediate action required!`
+          : `Warning: Your email "${targetValue}" was found in publicly accessible developer resources. Review recommended.`;
 
-      await Alert.create({
-        userId,
-        type: alertType,
-        severity,
-        message: alertMessage,
-      });
+        await Alert.create({
+          userId,
+          type: 'public_exposure',
+          severity: alertSeverity,
+          message: alertMessage,
+        });
+      }
     }
 
     // Update user's reputation score and last manual scan time
@@ -102,25 +132,37 @@ const runScan = async (req, res) => {
       lastManualScanAt: new Date(),
     });
 
-    // Return scan result
+    // Build response message
+    const responseMessage = scanLimitedData
+      ? 'Scan completed with limited public data availability'
+      : 'Scan completed successfully';
+
+    // Return scan result (privacy-safe)
     res.status(200).json({
       success: true,
-      message: 'Scan completed successfully',
+      message: responseMessage,
       data: {
         scanId: scan._id,
         scanTarget,
         targetValue,
         findings: {
-          breachCount,
-          publicMentions,
+          publicExposure: findings.publicExposure,
+          publicMentions: findings.publicMentions,
         },
         riskScore: finalScore,
         severity,
+        explanation,
         scannedAt: scan.createdAt,
       },
     });
   } catch (error) {
     console.error('Scan error:', error);
+    console.error('Error stack:', error.stack);
+    console.error('Error details:', {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+    });
     res.status(500).json({
       success: false,
       message: 'Server error during scan',
@@ -129,6 +171,52 @@ const runScan = async (req, res) => {
   }
 };
 
+// @desc    Get latest scan for logged-in user
+// @route   GET /api/scan/latest
+// @access  Private
+const getLatestScan = async (req, res) => {
+  try {
+    const userId = req.user._id;
+
+    // Fetch the most recent scan for the user
+    const latestScan = await Scan.findOne({ userId })
+      .sort({ createdAt: -1 })
+      .select('-__v');
+
+    if (!latestScan) {
+      return res.status(404).json({
+        success: false,
+        message: 'No scans found',
+      });
+    }
+
+    // Format response to match frontend expectations
+    const response = {
+      success: true,
+      data: {
+        _id: latestScan._id,
+        target: latestScan.targetValue,
+        targetType: latestScan.scanTarget,
+        breachCount: latestScan.findings?.breachCount || 0,
+        publicMentions: latestScan.findings?.publicMentions || 0,
+        exposedAccounts: latestScan.findings?.exposedAccounts || 0,
+        riskScore: latestScan.riskScore || 0,
+        createdAt: latestScan.createdAt,
+      },
+    };
+
+    res.status(200).json(response.data);
+  } catch (error) {
+    console.error('Get latest scan error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error retrieving latest scan',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   runScan,
+  getLatestScan,
 };

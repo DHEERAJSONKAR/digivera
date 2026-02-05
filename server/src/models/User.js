@@ -57,6 +57,10 @@ const userSchema = new mongoose.Schema(
       min: 0,
       max: 100,
     },
+    profilePhoto: {
+      type: String,
+      default: null,
+    },
     lastManualScanAt: {
       type: Date,
       default: null,

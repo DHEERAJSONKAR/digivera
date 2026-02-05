@@ -48,10 +48,15 @@ const createSubscription = async (req, res) => {
 
     if (pricing.provider === 'razorpay') {
       // Create Razorpay order
+      // Receipt must be max 40 characters
+      const timestamp = Date.now().toString().slice(-8); // Last 8 digits
+      const userIdShort = userId.toString().slice(-8); // Last 8 chars of userId
+      const receipt = `rcpt_${userIdShort}_${timestamp}`; // Total ~25 chars
+      
       const options = {
         amount: pricing.amount,
         currency: pricing.currency,
-        receipt: `receipt_${userId}_${Date.now()}`,
+        receipt: receipt,
         notes: {
           userId: userId.toString(),
           plan: 'pro',
@@ -89,16 +94,13 @@ const createSubscription = async (req, res) => {
                 description: 'Monthly subscription - Unlimited scans + Weekly auto scan',
               },
               unit_amount: pricing.amount,
-              recurring: {
-                interval: 'month',
-              },
             },
             quantity: 1,
           },
         ],
-        mode: 'subscription',
-        success_url: `${req.headers.origin || 'http://localhost:3000'}/success?session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${req.headers.origin || 'http://localhost:3000'}/cancel`,
+        mode: 'payment',
+        success_url: `${req.headers.origin || 'http://localhost:3002'}/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${req.headers.origin || 'http://localhost:3002'}/cancel`,
         client_reference_id: userId.toString(),
         customer_email: user.email,
         metadata: {
@@ -226,6 +228,13 @@ const handleStripeWebhook = async (req, res) => {
       const userId = session.metadata.userId;
 
       try {
+        // Check if already upgraded
+        const user = await User.findById(userId);
+        if (user.plan === 'pro') {
+          console.log(`User ${userId} already Pro, skipping webhook upgrade`);
+          break;
+        }
+
         // Update user to Pro
         await User.findByIdAndUpdate(userId, { plan: 'pro' });
 
@@ -314,9 +323,97 @@ const getSubscriptionStatus = async (req, res) => {
   }
 };
 
+// @desc    Verify Stripe payment (called from success page)
+// @route   POST /api/subscribe/verify-stripe
+// @access  Private
+const verifyStripePayment = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const { session_id } = req.body;
+
+    if (!session_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing session ID',
+      });
+    }
+
+    // Retrieve session from Stripe
+    const session = await stripe.checkout.sessions.retrieve(session_id);
+
+    // Verify session belongs to this user
+    if (session.client_reference_id !== userId.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Session does not belong to this user',
+      });
+    }
+
+    // Check if payment was successful
+    if (session.payment_status !== 'paid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Payment not completed',
+      });
+    }
+
+    // Check if already upgraded (prevent duplicate upgrades)
+    const user = await User.findById(userId);
+    if (user.plan === 'pro') {
+      return res.status(200).json({
+        success: true,
+        message: 'You are already a Pro user',
+        data: {
+          plan: 'pro',
+        },
+      });
+    }
+
+    // Update user to Pro
+    await User.findByIdAndUpdate(userId, { plan: 'pro' });
+
+    // Calculate subscription end date (30 days from now)
+    const startDate = new Date();
+    const endDate = new Date();
+    endDate.setDate(endDate.getDate() + 30);
+
+    // Create subscription record
+    await Subscription.create({
+      userId,
+      provider: 'stripe',
+      providerId: session.id,
+      status: 'active',
+      amount: session.amount_total / 100, // Convert cents to dollars
+      currency: session.currency,
+      startedAt: startDate,
+      endsAt: endDate,
+    });
+
+    console.log(`User ${userId} upgraded to Pro via Stripe (manual verification)`);
+
+    res.status(200).json({
+      success: true,
+      message: 'Payment verified successfully. Welcome to Pro!',
+      data: {
+        plan: 'pro',
+        sessionId: session_id,
+        validUntil: endDate,
+      },
+    });
+  } catch (error) {
+    console.error('Verify Stripe payment error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Payment verification failed',
+      error: error.message,
+    });
+  }
+};
+
 module.exports = {
   createSubscription,
   verifyPayment,
+  verifyStripePayment,
   handleStripeWebhook,
   getSubscriptionStatus,
 };

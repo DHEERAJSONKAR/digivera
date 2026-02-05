@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 const authRoutes = require('./routes/authRoutes');
 const googleAuthRoutes = require('./routes/googleAuthRoutes');
-const phoneAuthRoutes = require('./routes/phoneAuthRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const scanRoutes = require('./routes/scanRoutes');
 const alertRoutes = require('./routes/alertRoutes');
@@ -15,6 +15,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve static files (profile photos)
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Test route
 app.get('/', (req, res) => {
@@ -31,7 +34,6 @@ app.get('/', (req, res) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', googleAuthRoutes);
-app.use('/api/auth/phone', phoneAuthRoutes);
 app.use('/api/me', profileRoutes);
 app.use('/api/scan', scanRoutes);
 app.use('/api/alerts', alertRoutes);
